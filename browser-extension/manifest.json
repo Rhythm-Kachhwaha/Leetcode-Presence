@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "LeetPresence",
+  "version": "0.1.0",
+  "description": "Sends the currently open LeetCode problem to local Discord Rich Presence.",
+  "permissions": [],
+  "host_permissions": [
+    "https://leetcode.com/*",
+    "http://127.0.0.1:8000/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://leetcode.com/problems/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
