@@ -5,13 +5,13 @@ slug to the local LeetPresence API.
 
 ## Install in Brave
 
-1. Start the API: `python -m uvicorn main:app --reload`
+1. Start LeetPresence: `python run.py`
 2. Open `brave://extensions`.
 3. Enable **Developer mode**.
 4. Select **Load unpacked**.
 5. Choose this `browser-extension` folder.
 
-Keep `presence.py` and the FastAPI server running. Open any URL in the form
+Keep LeetPresence running. Open any URL in the form
 `https://leetcode.com/problems/<problem-slug>/`; the extension calls the local
 API, and Discord Rich Presence refreshes within one minute.
 

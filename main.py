@@ -1,160 +1,149 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from fastapi import HTTPException
-from database import Base, SessionLocal, engine
-from models import ActivityModel
+from collections.abc import Generator
+
 import requests
+from fastapi import Depends, FastAPI, HTTPException
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from database import Base, SessionLocal, engine
+from leetcode import fetch_problem
+from models import ActivityModel, CurrentActivityModel
+
 
 Base.metadata.create_all(bind=engine)
+app = FastAPI(title="LeetPresence API")
 
-app = FastAPI()
+
 class Activity(BaseModel):
     problem_id: int
-    title : str
-    difficulty : str
-    slug:str
+    title: str
+    difficulty: str
+    slug: str
+
 
 class Problem(BaseModel):
-    id:str
-    title:str
-    difficulty:str
-    slug : str
+    id: str
+    title: str
+    difficulty: str
+    slug: str
 
 
-url = "https://leetcode.com/graphql"
+def get_db() -> Generator[Session, None, None]:
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
+
+def as_dict(activity: ActivityModel | CurrentActivityModel) -> dict:
+    return {
+        "id": activity.id,
+        "problem_id": activity.problem_id,
+        "title": activity.title,
+        "difficulty": activity.difficulty,
+        "slug": activity.slug,
+    }
+
+
+def save_current_activity(db: Session, activity: Activity) -> tuple[CurrentActivityModel, bool]:
+    current = db.get(CurrentActivityModel, 1)
+    changed = current is None or current.slug != activity.slug
+
+    if current is None:
+        current = CurrentActivityModel(id=1, **activity.model_dump())
+        db.add(current)
+    elif changed:
+        current.problem_id = activity.problem_id
+        current.title = activity.title
+        current.difficulty = activity.difficulty
+        current.slug = activity.slug
+
+    if changed:
+        db.add(ActivityModel(**activity.model_dump()))
+        db.commit()
+        db.refresh(current)
+
+    return current, changed
+
+
+@app.get("/")
+def home():
+    return {"message": "LeetPresence API is running"}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 
 @app.post("/activity")
-def create_activity(activity: Activity):
-
-    db = SessionLocal()
-
-    db_activity = ActivityModel(
-        problem_id=activity.problem_id,
-        title=activity.title,
-        difficulty=activity.difficulty,
-        slug=activity.slug
-    )
-
-    db.add(db_activity)
-    db.commit()
-    db.refresh(db_activity)
-
-    db.close()
-
-    return {
-        "message": "Activity saved",
-        "id": db_activity.id
-    }
-@app.get("/")
-def home():
-    return {"message":"LC Presence is Running"}
-
-@app.get("/problem/{slug}",response_model=Problem)
-def get_problem(slug: str):
-    query = f"""
-    query {{
-        question(titleSlug: "{slug}") {{
-            questionId
-            questionFrontendId
-            title
-            difficulty
-            titleSlug
-        }}
-    }}
-    """
-    response = requests.post(
-        url,
-        json={"query": query}
-    )
-
-    data = response.json()["data"]["question"]
-    if data is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Leetcode problem not found"
-        )
-    return {
-        "id": data["questionFrontendId"],
-        "title": data["title"],
-        "difficulty": data["difficulty"],
-        "slug": data["titleSlug"]
-    }
-
-
-
-@app.get("/problems")
-def get_problems(difficulty: str = "ALL"):
-    return {
-        "difficulty":difficulty,
-        "message": f"Showing {difficulty} problems"
-    }
+def create_activity(activity: Activity, db: Session = Depends(get_db)):
+    current, changed = save_current_activity(db, activity)
+    return {"message": "Activity saved", "changed": changed, "activity": as_dict(current)}
 
 
 @app.get("/activity/latest")
-def get_latest_activity():
-    db = SessionLocal()
+def get_latest_activity(db: Session = Depends(get_db)):
+    current = db.get(CurrentActivityModel, 1)
+    if current is None:
+        raise HTTPException(status_code=404, detail="No current LeetCode problem")
+    return as_dict(current)
 
-    latest_activity = (
-        db.query(ActivityModel)
-        .order_by(ActivityModel.id.desc())
-        .first()
-    )
 
-    db.close()
+@app.get("/activity/history")
+def get_activity_history(limit: int = 20, db: Session = Depends(get_db)):
+    limit = max(1, min(limit, 100))
+    history = db.query(ActivityModel).order_by(ActivityModel.id.desc()).limit(limit).all()
+    return [as_dict(activity) for activity in history]
 
-    if latest_activity is None:
-        raise HTTPException(
-            status_code=404,
-            detail="No activity found"
-        )
+
+@app.post("/activity/clear")
+def clear_current_activity(db: Session = Depends(get_db)):
+    current = db.get(CurrentActivityModel, 1)
+    if current is not None:
+        db.delete(current)
+        db.commit()
+    return {"message": "Current activity cleared"}
+
+
+@app.get("/problem/{slug}", response_model=Problem)
+def get_problem(slug: str):
+    try:
+        problem = fetch_problem(slug)
+    except (requests.RequestException, ValueError) as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+    if problem is None:
+        raise HTTPException(status_code=404, detail="LeetCode problem not found")
 
     return {
-        "id": latest_activity.id,
-        "problem_id": latest_activity.problem_id,
-        "title": latest_activity.title,
-        "difficulty": latest_activity.difficulty,
-        "slug": latest_activity.slug
+        "id": problem["questionFrontendId"],
+        "title": problem["title"],
+        "difficulty": problem["difficulty"],
+        "slug": problem["titleSlug"],
     }
+
+
 @app.post("/activity/from-problem/{slug}")
-def save_activity_from_problem(slug: str):
-    query = f"""
-    query {{
-        question(titleSlug: "{slug}") {{
-            questionFrontendId
-            title
-            difficulty
-            titleSlug
-        }}
-    }}
-    """
+def save_activity_from_problem(slug: str, db: Session = Depends(get_db)):
+    try:
+        problem = fetch_problem(slug)
+    except (requests.RequestException, ValueError) as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
 
-    response = requests.post(url, json={"query": query})
-    data = response.json()["data"]["question"]
+    if problem is None:
+        raise HTTPException(status_code=404, detail="LeetCode problem not found")
 
-    if data is None:
-        raise HTTPException(
-            status_code=404,
-            detail="LeetCode problem not found"
-        )
-
-    db = SessionLocal()
-
-    db_activity = ActivityModel(
-        problem_id=int(data["questionFrontendId"]),
-        title=data["title"],
-        difficulty=data["difficulty"],
-        slug=data["titleSlug"]
+    activity = Activity(
+        problem_id=int(problem["questionFrontendId"]),
+        title=problem["title"],
+        difficulty=problem["difficulty"],
+        slug=problem["titleSlug"],
     )
-
-    db.add(db_activity)
-    db.commit()
-    db.refresh(db_activity)
-    db.close()
-
+    current, changed = save_current_activity(db, activity)
     return {
-        "message": "Activity fetched and saved",
-        "id": db_activity.id,
-        "title": db_activity.title
+        "message": "Current activity updated" if changed else "Current activity unchanged",
+        "changed": changed,
+        "activity": as_dict(current),
     }
